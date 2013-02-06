@@ -18,50 +18,87 @@ class Point:
 		self.z += delta
 		return self
 
-class Material:
+class Material(object):
 	def __init__(self, rho):
 		self.rho = rho
 
-class BBShell:
-	def __init__(self, diameter, length, thickness, material):
-		self.diameter = diameter
-		self.length = length
-		self.radius = diameter/2.
-		self.thickness = thickness
-		self.material = material
-
-	def patch(self):
-		return mpatches.Circle((0., 0.), self.radius, fill = False, ec = "k", lw = 2)
-
-	def volume(self):
-		surface = np.pi*(self.radius**2 - (self.radius-self.thickness)**2)
-		return surface*self.length
-	def weight(self):
-		return self.volume()*self.material.rho
 
 
-class Tube:
+class Tube(object):
 	def __init__(self, diameter, thickness, material, start, end):
 		self.diameter = diameter
+		self.radius = self.diameter/2.
 		self.start = start
 		self.end = end
 		self.material = material
 		self.thickness = thickness
+		self.length = np.sqrt((self.end.x-self.start.x)**2 + (self.end.y-self.start.y)**2 + (self.end.z-self.start.z)**2)
 
 	def volume(self):
 		surface = np.pi*((self.diameter/2.)**2 - (self.diameter/2.-self.thickness)**2)
-		length = np.sqrt((self.end.x-self.start.x)**2 + (self.end.y-self.start.y)**2 + (self.end.z-self.start.z)**2)
-		return surface*length
+		return surface*self.length
 	def weight(self):
 		return self.volume()*self.material.rho
-		
+
+	def inertia(self, point):
+		# computes the inertia at the given point
+		OG = np.array([0, 0, self.length/2.])
+		I1 = self.weight()/12.*(3*(self.radius**2 + (self.radius - self.thickness)**2) + self.length**2)
+		I2 = self.weight()/2.*(self.radius**2 + (self.radius - self.thickness)**2)
+		J = np.diag([I1, I1, I2])
+		if self.end.x != 0.:
+			beta = -np.arctan(self.end.y/self.end.x)
+			rot_z = np.array([[np.cos(beta), -np.sin(beta), 0], [np.sin(beta), np.cos(beta), 0], [0, 0, 1]])
+		else:
+			rot_z = np.eye(3)
+		if self.end.x != 0 and self.end.y != 0:
+			alpha = np.arctan(self.end.z/np.sqrt(self.end.x**2 + self.end.y**2))
+			rot_y = np.array([[np.cos(alpha), 0, np.sin(alpha)], [0, 1, 0], [-np.sin(alpha), 0, np.cos(alpha)]])
+		else:
+			rot_y = np.eye(3)
+		[a, b, c] = np.dot(np.dot(OG, rot_z), rot_y) - np.array([point.x, point.y, point.z])
+		J2 = np.dot(np.dot(J, rot_z), rot_y) + self.weight() * np.array([[b**2+c**2, a*b, a*c], [a*b, a**2+c**2, b*c],[a*c, b*c, a**2+b**2]])
+		return J2
+
 	def patch(self):
 		verts = [(self.start.x, self.start.z), (self.end.x, self.end.z)]
 		codes = [Path.MOVETO, Path.LINETO]
 		path = Path(verts, codes)
 		return mpatches.PathPatch(path, lw=2)
 
-class Fork:
+
+
+class BBShell(Tube):
+	def __init__(self, diameter, length, thickness, material):
+		start = Point(0, -length/2., 0)
+		end = Point(0, length/2., 0)
+		# BBShell is a a tube along y at the origin
+		super(BBShell, self).__init__(diameter, thickness, material, start, end)
+
+	def patch(self):
+		return mpatches.Circle((0., 0.), self.radius, fill = False, ec = "k", lw = 2)
+
+
+
+class Wheel(Tube):
+	def __init__(self, diameter, center, weight):
+		width = 5
+		thickness = 5
+		start = Point(center.x, -width/2., center.z)
+		end = Point(center.x, width/2., center.z)
+		self.center = center
+		self.tot_weight = weight
+		material = Material(0)
+		super(Wheel, self).__init__(diameter, thickness, material, start, end)
+	def patch(self):
+		return mpatches.Circle((self.center.x, self.center.z), self.radius, fill = False, ec = "k", lw = 4)
+	def weight(self):
+		return self.tot_weight
+
+
+
+
+class Fork(object):
 	def __init__(self, material, diameter, thickness, alpha4, l5, fork_gap, e3, e4):
 		self.material = material
 		self.diameter = diameter
@@ -86,18 +123,10 @@ class Fork:
 		tube3b = Tube(self.diameter, self.thickness, self.material, self.pointB, self.front_axis.move_y(self.e4/2.))
 		self.components = [tube1f, tube1b, tube2f, tube2b, tube3f, tube3b]
 
-class Wheel:
-	def __init__(self, diameter, center, weight):
-		self.diameter = diameter
-		self.radius = diameter/2.
-		self.center = center
-		self.tot_weight = weight
-	def patch(self):
-		return mpatches.Circle((self.center.x, self.center.z), self.radius, fill = False, ec = "k", lw = 4)
-	def weight(self):
-		return self.tot_weight
 
-class Frame:
+
+
+class Frame(object):
 	def __init__(self, material, diameter, thickness, alpha1, alpha2, alpha3, l1, l2, l3, l4, e1, e2, bbshell):
 		self.material = material
 		self.diameter = diameter
@@ -181,6 +210,9 @@ class Frame:
 	def weight(self):
 		return np.sum([x.weight() for x in self.components])
 
+	def inertia(self, point):
+		return np.sum([x.inertia(point) for x in self.components], axis=0)
+
 
 	def plot_schema(self):
 		patches = [x.patch() for x in self.components]
@@ -193,6 +225,7 @@ class Frame:
 		plt.axis("equal")
 	
 		plt.show()
+
 
 steel = Material(7829e-9)
 bbshell = BBShell(68, 100, 2, steel)
